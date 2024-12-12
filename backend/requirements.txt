@@ -1,0 +1,15 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+python-multipart==0.0.6
+torch==2.1.1
+torchvision==0.16.1
+git+https://github.com/openai/CLIP.git
+opencv-python==4.8.1.78
+numpy==1.26.2
+Pillow==10.1.0
+python-jose==3.3.0
+pydantic==2.5.2
+sse-starlette
+
+# Note: ViT-L/14 requires approximately 2GB of VRAM
+# Recommended: CUDA-capable GPU with at least 4GB VRAM
