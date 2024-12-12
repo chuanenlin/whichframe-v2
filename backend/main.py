@@ -41,7 +41,11 @@ app.mount("/frames", StaticFiles(directory=str(FRAMES_DIR)), name="frames")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://*.vercel.app",  # Allow all Vercel preview deployments
+        "https://your-production-domain.com"  # Replace with your actual domain
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
