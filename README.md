@@ -2,7 +2,7 @@
 
 Search a video *semantically* using natural language, images, or snapshots from the video.
 
-![Demo](./demo/whichframe.gif)
+![Teaser](./demo/whichframe.gif)
 
 ## Setting up
 
@@ -47,6 +47,10 @@ uvicorn main:app --reload
 - Scrub through the video timeline
   - Marker transparency indicates similarity scores
 - Press `Space` to play/pause the video
+
+## Demo for v1
+You can try out Version 1 with basic interface here: [https://huggingface.co/spaces/chuanenlin/which-frame](https://huggingface.co/spaces/chuanenlin/which-frame)
+
 
 ## License
 
