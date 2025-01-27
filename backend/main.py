@@ -20,17 +20,20 @@ from functools import partial
 import shutil
 import base64
 from pydantic import BaseModel
+import subprocess
 
 VIDEOS_DIR = Path("videos")
 CACHE_DIR = Path("cache")
 UPLOADS_DIR = Path("uploads")
 FRAMES_DIR = UPLOADS_DIR / "frames"
 SCREENSHOTS_DIR = Path("screenshots")
+CLIPS_DIR = UPLOADS_DIR / "clips"
 VIDEOS_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(exist_ok=True)
 UPLOADS_DIR.mkdir(exist_ok=True)
 FRAMES_DIR.mkdir(exist_ok=True)
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
+CLIPS_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(
     title="Which Frame",
@@ -38,6 +41,7 @@ app = FastAPI(
 )
 
 app.mount("/frames", StaticFiles(directory=str(FRAMES_DIR)), name="frames")
+app.mount("/clips", StaticFiles(directory=str(CLIPS_DIR)), name="clips")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,6 +76,10 @@ def process_frame_batch(frames: List[np.ndarray], start_idx: int, fps: float, vi
     for i, frame in enumerate(frames):
         frame_count = start_idx + i
         current_time = frame_count / fps
+        
+        # Print progress
+        if frame_count % 10 == 0 or frame_count == current_progress['total_frames']:  # Print every 10 frames
+            print(f"Processing frame {frame_count:,}/{current_progress['total_frames']:,} ({(frame_count/current_progress['total_frames']*100):.1f}%) - {current_time:.2f}s")
         
         # Save frame
         frame_path = video_frames_dir / f"frame_{frame_count}.jpg"
@@ -165,6 +173,11 @@ def save_test_data(video_id: str, processed_data: Dict, frames_dir: Path) -> Non
     if test_frames_dir.exists():
         shutil.rmtree(test_frames_dir)
     shutil.copytree(frames_dir, test_frames_dir)
+    
+    # Copy the video file
+    video_path = UPLOADS_DIR / f"{video_id}.mp4"
+    if video_path.exists():
+        shutil.copy2(video_path, TEST_DATA_DIR / TEST_VIDEO_NAME)
 
 def load_test_data() -> Optional[Dict]:
     """Load processed data for test video."""
@@ -174,6 +187,10 @@ def load_test_data() -> Optional[Dict]:
         
     with open(json_path, "r") as f:
         return json.load(f)
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
 @app.get("/progress")
 async def progress():
@@ -192,21 +209,40 @@ async def progress():
 async def upload_video(file: UploadFile = File(...)):
     try:
         global current_progress
-        current_progress = {"current_frame": 0, "total_frames": 0}
-        print("Starting upload")  # Debug print
+        current_progress = {"current_frame": 0, "total_frames": 0, "fps": 0, "current_time": 0}
+        print("\nStarting upload and processing...")
         
-        # Save video file first to get total frames
-        upload_dir = Path("uploads")
-        frames_dir = upload_dir / "frames"
-        upload_dir.mkdir(exist_ok=True)
-        frames_dir.mkdir(exist_ok=True)
+        # Check if this is the test video first
+        is_test_video = file.filename == TEST_VIDEO_NAME
+        if is_test_video:
+            print("Loading test video data")
+            test_data = load_test_data()
+            if test_data is not None:
+                video_id = test_data["id"]
+                # Set progress to complete immediately for test video
+                current_progress = {
+                    "current_frame": test_data["total_frames"],
+                    "total_frames": test_data["total_frames"],
+                    "fps": test_data["fps"],
+                    "current_time": test_data["duration"]
+                }
+                print("Using cached test video data")
+                return {
+                    "id": video_id,
+                    "duration": test_data["duration"],
+                    "fps": test_data["fps"]
+                }
         
+        # Save video file
         video_id = str(int(time.time()))
-        video_path = upload_dir / f"{video_id}.mp4"
-        with open(video_path, "wb") as buffer:
-            buffer.write(await file.read())
+        video_path = UPLOADS_DIR / f"{video_id}.mp4"
+        print(f"Saving video to: {video_path}")
         
-        # Get video info first
+        with open(video_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        # Get video info
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
             raise HTTPException(status_code=400, detail="Could not open video")
@@ -215,33 +251,28 @@ async def upload_video(file: UploadFile = File(...)):
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         duration = total_frames / fps
         
-        # Set total frames immediately
-        current_progress["total_frames"] = total_frames
-        print(f"Total frames: {total_frames}")  # Debug print
+        print(f"\nVideo info:")
+        print(f"- FPS: {fps:.2f}")
+        print(f"- Total frames: {total_frames}")
+        print(f"- Duration: {duration:.2f}s")
         
-        # Check if this is the test video
-        is_test_video = file.filename == TEST_VIDEO_NAME
-        if is_test_video:
-            test_data = load_test_data()
-            if test_data is not None:
-                video_id = test_data["id"]
-                target_frames_dir = Path("uploads") / "frames" / video_id
-                if not target_frames_dir.exists():
-                    shutil.copytree(TEST_DATA_DIR / "frames", target_frames_dir)
-                return {
-                    "id": video_id,
-                    "duration": test_data["duration"],
-                    "fps": test_data["fps"]
-                }
+        # Set initial progress
+        current_progress = {
+            "current_frame": 0,
+            "total_frames": total_frames,
+            "fps": fps,
+            "current_time": 0
+        }
         
-        video_frames_dir = frames_dir / video_id
+        # Process frames
+        video_frames_dir = FRAMES_DIR / video_id
         video_frames_dir.mkdir(exist_ok=True)
         
-        # Process frames in batches
         frames_data = []
         batch_size = 30
         frame_count = 0
         
+        print("\nProcessing frames...")
         while True:
             batch_frames = []
             for _ in range(batch_size):
@@ -251,12 +282,11 @@ async def upload_video(file: UploadFile = File(...)):
                 batch_frames.append(frame)
                 frame_count += 1
                 current_progress["current_frame"] = frame_count
-                print(f"Processed frame {frame_count}/{total_frames}")  # Debug print
+                current_progress["current_time"] = frame_count / fps
             
             if not batch_frames:
                 break
             
-            # Process batch
             batch_data = process_frame_batch(
                 batch_frames,
                 frame_count - len(batch_frames),
@@ -267,18 +297,10 @@ async def upload_video(file: UploadFile = File(...)):
                 device
             )
             frames_data.extend(batch_data)
-            
-            # Clear batch from memory
             batch_frames.clear()
         
         cap.release()
-        print("Processing complete")  # Debug print
-        
-        if not frames_data:
-            raise HTTPException(status_code=400, detail="No frames could be extracted from video")
-        
-        # Sort frames_data by time to ensure correct order
-        frames_data.sort(key=lambda x: x["time"])
+        print(f"\nProcessed {frame_count} frames")
         
         # Save processed data
         processed_data = {
@@ -289,21 +311,18 @@ async def upload_video(file: UploadFile = File(...)):
             "frames": frames_data
         }
         
-        with open(upload_dir / f"{video_id}.json", "w") as f:
+        data_path = UPLOADS_DIR / f"{video_id}.json"
+        with open(data_path, "w") as f:
             json.dump(processed_data, f)
         
-        # After processing, save test data if this is the test video
-        if is_test_video:
-            save_test_data(video_id, processed_data, video_frames_dir)
-        
+        print("\nProcessing complete!")
         return {"id": video_id, "duration": duration, "fps": fps}
         
     except Exception as e:
-        print(f"Error during upload: {e}")  # Debug print
+        print(f"\nError during upload: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        current_progress = {"current_frame": 0, "total_frames": 0}
-        print("Upload complete")  # Debug print
+        current_progress = {"current_frame": 0, "total_frames": 0, "fps": 0, "current_time": 0}
 
 @app.get("/video/{video_id}")
 async def get_video(video_id: str):
@@ -543,3 +562,95 @@ async def save_screenshot(
         return {"image_path": str(image_path)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save screenshot: {str(e)}")
+
+@app.post("/cut_video/{video_id}")
+async def cut_video(video_id: str, start_time: float = Body(...), end_time: float = Body(...)):
+    try:
+        # Validate input parameters
+        if start_time < 0:
+            raise HTTPException(status_code=400, detail="Start time cannot be negative")
+        if end_time <= start_time:
+            raise HTTPException(status_code=400, detail="End time must be greater than start time")
+            
+        # Check if this is the test video
+        test_data = load_test_data()
+        if test_data is not None and video_id == test_data["id"]:
+            video_path = TEST_DATA_DIR / "baby-driver.mp4"
+            print(f"Using test video at path: {video_path}")
+        else:
+            video_path = UPLOADS_DIR / f"{video_id}.mp4"
+            print(f"Using uploaded video at path: {video_path}")
+            
+        if not video_path.exists():
+            print(f"Video not found at path: {video_path}")
+            raise HTTPException(status_code=404, detail=f"Video not found at path: {video_path}")
+            
+        # Check if ffmpeg is installed
+        try:
+            process = await asyncio.create_subprocess_exec(
+                'ffmpeg', '-version',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.communicate()
+            if process.returncode != 0:
+                raise HTTPException(status_code=500, detail="ffmpeg is not properly installed")
+        except FileNotFoundError:
+            raise HTTPException(status_code=500, detail="ffmpeg is not installed on the system")
+            
+        # Generate output path
+        timestamp = int(time.time())
+        output_path = CLIPS_DIR / f"clip_{video_id}_{timestamp}.mp4"
+        
+        # Use ffmpeg with a short re-encode at the start to avoid black frames
+        # We re-encode the first 1 second, then copy the rest
+        cmd = [
+            'ffmpeg',
+            '-i', str(video_path),
+            '-ss', str(start_time),
+            '-t', str(end_time - start_time),
+            '-c:v', 'libx264',  # Use h264 codec
+            '-preset', 'veryfast',  # Fast encoding
+            '-crf', '23',  # Good quality
+            '-force_key_frames', f'expr:gte(t,0)',  # Force keyframe at start
+            '-x264opts', 'keyint=25',  # Set keyframe interval
+            '-c:a', 'aac',  # Re-encode audio to ensure sync
+            '-y',  # Overwrite output file if it exists
+            str(output_path)
+        ]
+        
+        print(f"Executing command: {' '.join(cmd)}")
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await process.communicate()
+        stderr_text = stderr.decode() if stderr else ""
+        
+        if process.returncode != 0:
+            error_msg = f"ffmpeg failed with return code {process.returncode}. Error: {stderr_text}"
+            print(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+            
+        if not output_path.exists():
+            raise HTTPException(
+                status_code=500,
+                detail="Output file was not created. This might be due to insufficient permissions or disk space."
+            )
+            
+        # Return the clip file
+        return FileResponse(
+            path=output_path,
+            media_type='video/mp4',
+            filename=f'clip_{timestamp}.mp4'
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = f"Unexpected error while cutting video: {str(e)}"
+        print(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)

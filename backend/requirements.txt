@@ -10,6 +10,8 @@ Pillow==10.1.0
 python-jose==3.3.0
 pydantic==2.5.2
 sse-starlette
+ffmpeg-python==0.2.0
 
 # Note: ViT-L/14 requires approximately 2GB of VRAM
 # Recommended: CUDA-capable GPU with at least 4GB VRAM
+# Required: ffmpeg must be installed on the system
